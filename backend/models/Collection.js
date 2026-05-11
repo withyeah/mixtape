@@ -4,8 +4,8 @@ const CollectionSchema = new mongoose.Schema({
   userId: { type: String, required: true, unique: true, index: true },
   tapes: [
     {
-      tapeCode: { type: String, required: true },
-      addedAt:  { type: Date, default: Date.now },
+      tapeCode: { type: String,  required: true }, // refs Mixtape.code
+      addedAt:  { type: Date,    default: Date.now },
       isOwner:  { type: Boolean, default: false }
     }
   ]
