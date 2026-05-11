@@ -4,6 +4,7 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>MixTape</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;600;700&family=Special+Elite&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet"/>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -211,6 +212,29 @@ input.vol-slider{flex:1;accent-color:var(--accent)}
 .modal{background:var(--bg2);border:1px solid var(--border2);border-radius:12px;padding:1.5rem;width:360px;max-width:90vw}
 .modal h2{font-family:var(--font-hand);font-size:1.5rem;margin-bottom:1rem}
 .modal-actions{display:flex;gap:.5rem;margin-top:1.25rem;justify-content:flex-end}
+/* Export wrapper — used by html2canvas as the capture root */
+#export-target {
+  background: var(--bg);
+  padding: 1.5rem;
+  border-radius: 12px;
+}
+
+/* Hidden story-mode wrapper for 9:16 export */
+#story-export-frame {
+  position: fixed;
+  left: -9999px;
+  top: 0;
+  width: 1080px;
+  height: 1920px;
+  background: #0a0a0a;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2rem;
+  padding: 4rem;
+  z-index: -1;
+}
 /* Misc */
 .section-title{font-size:.72rem;color:var(--text3);letter-spacing:1.5px;text-transform:uppercase;margin-bottom:.75rem;display:flex;align-items:center;gap:.5rem}
 .section-title::after{content:'';flex:1;height:1px;background:var(--border)}
@@ -237,7 +261,7 @@ a.sp-export:hover{text-decoration:underline}
     <!-- LEFT: Cassette visual + liner card -->
     <div class="create-left">
       <div class="section-title">Design</div>
-      <div class="cassette-wrap">
+      <div class="cassette-wrap" id="export-target">
         <!-- Cassette rendered here -->
         <div id="cassette-el" class="cassette tdk">
           <div class="c-label">
@@ -518,30 +542,40 @@ var MOCK_SONGS = [
 async function searchSongs() {
   const q  = document.getElementById('search-input').value.trim();
   const el = document.getElementById('search-results');
-  if (!q) return;
+
+  if (!q) { toast('Type something to search'); return; }
 
   el.style.display = 'block';
   el.innerHTML = '<div style="padding:.75rem;font-size:.82rem;color:var(--text2)">Searching...</div>';
 
   try {
-    const res  = await fetch(`http://localhost:3001/api/search?q=${encodeURIComponent(q)}`);
+    const res  = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
     const data = await res.json();
 
-    if (!data.success || !data.results.length) {
-      el.innerHTML = '<div style="padding:.75rem;font-size:.82rem;color:var(--text2)">No results.</div>';
+    if (!data.success || !data.results || data.results.length === 0) {
+      el.innerHTML = '<div style="padding:.75rem;font-size:.82rem;color:var(--text2)">No results found.</div>';
       return;
     }
+
     el.innerHTML = data.results.map(s => `
-      <div class="result-item" onclick='addTrack(${JSON.stringify(s)})'>
-        <img class="result-thumb" src="${s.albumArtUrl||''}" onerror="this.style.display='none'"/>
+      <div class="result-item" onclick='addTrack(${JSON.stringify(s).replace(/'/g, "&#39;")})'>
+        ${s.albumArtUrl
+          ? `<img class="result-thumb" src="${s.albumArtUrl}" onerror="this.style.background='#333';this.removeAttribute('src')"/>`
+          : `<div class="result-thumb" style="display:flex;align-items:center;justify-content:center;font-size:1.2rem">&#127925;</div>`
+        }
         <div class="result-info">
           <div class="result-title">${s.title}</div>
           <div class="result-artist">${s.artist}</div>
         </div>
-        <button class="result-add">+ Add</button>
-      </div>`).join('');
-  } catch {
-    el.innerHTML = '<div style="padding:.75rem;color:#c0392b;font-size:.82rem">Search failed. Is the backend running?</div>';
+        <button class="result-add" onclick="event.stopPropagation()">+ Add</button>
+      </div>
+    `).join('');
+
+  } catch (err) {
+    console.error('Search error:', err);
+    el.innerHTML = `<div style="padding:.75rem;color:#c0392b;font-size:.82rem">
+      Search failed: ${err.message}
+    </div>`;
   }
 }
 
@@ -628,7 +662,7 @@ async function saveTape() {
   if (!state.tracksA.length) { toast('Add at least 1 track first'); return; }
 
   try {
-    const res  = await fetch('http://localhost:3001/api/tapes', {
+    const res = await fetch('/api/tapes', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({
@@ -670,8 +704,99 @@ function openExportModal() {
 }
 function closeModal(){document.getElementById('export-modal').classList.remove('open');}
 
-function exportImage(type) {
-  toast('Image export requires html2canvas — integrate in production');
+async function exportImage(type) {
+  const tapeEl  = document.getElementById('cassette-el');
+  const linerEl = document.getElementById('liner-card');
+
+  if (!tapeEl) { toast('Nothing to export'); return; }
+
+  toast('Generating image...');
+
+  // html2canvas config shared between both formats
+  const baseOpts = {
+    backgroundColor: '#0a0a0a',
+    scale: 2,                    // retina quality
+    useCORS: true,               // allow Spotify/iTunes artwork URLs
+    allowTaint: false,
+    logging: false
+  };
+
+  try {
+    let canvas;
+
+    if (type === 'square') {
+      // ── 1:1 Square — capture cassette + liner together ──────
+      const target = document.getElementById('export-target');
+
+      // Temporarily hide the design-picker dots (not needed in export)
+      const picker = target.querySelector('.design-picker');
+      const pickerDisplay = picker.style.display;
+      picker.style.display = 'none';
+
+      canvas = await html2canvas(target, {
+        ...baseOpts,
+        width:  target.offsetWidth,
+        height: target.offsetHeight
+      });
+
+      picker.style.display = pickerDisplay;
+
+    } else {
+      // ── 9:16 Story — build a tall frame off-screen ──────────
+      const frame = document.createElement('div');
+      frame.id    = 'story-export-frame';
+      document.body.appendChild(frame);
+
+      // Clone both elements into the frame
+      const tapeCopy  = tapeEl.cloneNode(true);
+      const linerCopy = linerEl.cloneNode(true);
+
+      // Scale up for the larger canvas
+      tapeCopy.style.transform  = 'scale(1.8)';
+      tapeCopy.style.marginBottom = '3rem';
+      linerCopy.style.transform = 'scale(1.6)';
+
+      // Add tape title header
+      const heading = document.createElement('div');
+      heading.style.cssText = `
+        font-family: 'Caveat', cursive;
+        font-size: 52px;
+        font-weight: 700;
+        color: #e8a020;
+        text-align: center;
+        margin-bottom: 1rem;
+      `;
+      heading.textContent = state.title || 'My Mixtape';
+
+      frame.appendChild(heading);
+      frame.appendChild(tapeCopy);
+      frame.appendChild(linerCopy);
+
+      canvas = await html2canvas(frame, {
+        ...baseOpts,
+        width:  1080,
+        height: 1920
+      });
+
+      document.body.removeChild(frame);
+    }
+
+    // ── Trigger browser download ─────────────────────────────
+    const link     = document.createElement('a');
+    const filename = `mixtape-${(state.title || 'export').replace(/\s+/g,'-').toLowerCase()}-${type}.png`;
+    link.download  = filename;
+    link.href      = canvas.toDataURL('image/png');
+    link.click();
+
+    toast(`Downloaded ${filename} ✓`);
+
+    // ── Optionally: send to backend to store export record ───
+    // await uploadExportToServer(canvas, type);
+
+  } catch (err) {
+    console.error('Export error:', err);
+    toast('Export failed — check console');
+  }
 }
 
 function exportSpotify() {
@@ -700,7 +825,7 @@ async function redeemTape() {
       toast('Already in your shelf!'); return;
     }
 
-    const res  = await fetch(`http://localhost:3001/api/tapes/${code}`);
+    const res = await fetch(`/api/tapes/${code}`);
     const data = await res.json();
     if (!data.success) throw new Error(data.error);
 
